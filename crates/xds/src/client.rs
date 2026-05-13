@@ -2,13 +2,14 @@ use crate::proto::cluster::v1 as xds_cluster;
 use crate::proto::core::v1 as xds_core;
 use crate::proto::endpoint::v1 as xds_endpoint;
 use crate::proto::extensions::filters::network::http_connection_manager::v1 as xds_hcm;
+use crate::proto::extensions::transport_sockets::tls::v1 as xds_tls;
 use crate::proto::listener::v1 as xds_listener;
 use crate::proto::route::v1 as xds_route;
 use crate::proto::service::discovery::v1::aggregated_discovery_service_client::AggregatedDiscoveryServiceClient;
 use crate::proto::service::discovery::v1::{DiscoveryRequest, DiscoveryResponse};
 use dxgate_core::{
     Cluster, Endpoint as RuntimeEndpoint, HeaderMatch, Listener, ListenerProtocol, PathMatch,
-    Route, RouteMatch, RouterIdentity, RuntimeConfig, VirtualHost, WeightedCluster,
+    Route, RouteMatch, RouterIdentity, RuntimeConfig, UpstreamTls, VirtualHost, WeightedCluster,
 };
 use prost::Message;
 use prost_types::{value::Kind, Struct, Value};
@@ -302,6 +303,7 @@ impl AdsState {
             self.clusters.insert(
                 cluster.name.clone(),
                 ClusterSnapshot {
+                    tls: upstream_tls_from_cluster(&cluster),
                     name: cluster.name,
                     eds_service_name,
                 },
@@ -360,6 +362,7 @@ impl AdsState {
                     .get(&cluster.eds_service_name)
                     .cloned()
                     .unwrap_or_default(),
+                tls: cluster.tls.clone(),
             })
             .collect();
 
@@ -455,6 +458,73 @@ struct ListenerSnapshot {
 struct ClusterSnapshot {
     name: String,
     eds_service_name: String,
+    tls: Option<UpstreamTls>,
+}
+
+fn upstream_tls_from_cluster(cluster: &xds_cluster::Cluster) -> Option<UpstreamTls> {
+    let typed_config = match cluster.transport_socket.as_ref()?.config_type.as_ref()? {
+        xds_core::transport_socket::ConfigType::TypedConfig(any) => any,
+    };
+    if !typed_config
+        .type_url
+        .ends_with("extensions.transport_sockets.tls.v1.UpstreamTlsContext")
+    {
+        return None;
+    }
+    let tls = xds_tls::UpstreamTlsContext::decode(typed_config.value.as_slice()).ok()?;
+    let common = tls.common_tls_context.as_ref();
+    Some(UpstreamTls {
+        sni: first_non_empty(tls.sni, cluster_authority(&cluster.name)),
+        certificate_provider: common.and_then(certificate_provider_name),
+        validation_provider: common.and_then(validation_provider_name),
+        alpn_protocols: common
+            .map(|common| common.alpn_protocols.clone())
+            .unwrap_or_default(),
+    })
+}
+
+fn certificate_provider_name(common: &xds_tls::CommonTlsContext) -> Option<String> {
+    common
+        .tls_certificate_certificate_provider_instance
+        .as_ref()
+        .and_then(instance_name)
+}
+
+fn validation_provider_name(common: &xds_tls::CommonTlsContext) -> Option<String> {
+    let combined = match common.validation_context_type.as_ref()? {
+        xds_tls::common_tls_context::ValidationContextType::CombinedValidationContext(combined) => {
+            combined
+        }
+    };
+    combined
+        .validation_context_certificate_provider_instance
+        .as_ref()
+        .and_then(instance_name)
+}
+
+fn instance_name(
+    instance: &xds_tls::common_tls_context::CertificateProviderInstance,
+) -> Option<String> {
+    if instance.instance_name.is_empty() {
+        None
+    } else {
+        Some(instance.instance_name.clone())
+    }
+}
+
+fn cluster_authority(name: &str) -> Option<String> {
+    name.split('|')
+        .nth(3)
+        .filter(|authority| !authority.is_empty())
+        .map(ToString::to_string)
+}
+
+fn first_non_empty(value: String, fallback: Option<String>) -> Option<String> {
+    if value.is_empty() {
+        fallback
+    } else {
+        Some(value)
+    }
 }
 
 fn listener_snapshot(listener: xds_listener::Listener) -> Result<ListenerSnapshot, XdsError> {
@@ -770,6 +840,37 @@ mod tests {
                 service_name: cluster_name.into(),
                 eds_config: None,
             }),
+            transport_socket: Some(xds_core::TransportSocket {
+                name: "envoy.transport_sockets.tls".into(),
+                config_type: Some(xds_core::transport_socket::ConfigType::TypedConfig(any(
+                    "type.googleapis.com/extensions.transport_sockets.tls.v1.UpstreamTlsContext",
+                    xds_tls::UpstreamTlsContext {
+                        sni: "orders.app.svc.cluster.local".into(),
+                        common_tls_context: Some(xds_tls::CommonTlsContext {
+                            tls_certificate_certificate_provider_instance: Some(
+                                xds_tls::common_tls_context::CertificateProviderInstance {
+                                    instance_name: "workload".into(),
+                                    certificate_name: "default".into(),
+                                },
+                            ),
+                            alpn_protocols: vec!["h2".into()],
+                            validation_context_type: Some(
+                                xds_tls::common_tls_context::ValidationContextType::CombinedValidationContext(
+                                    xds_tls::common_tls_context::CombinedCertificateValidationContext {
+                                        validation_context_certificate_provider_instance: Some(
+                                            xds_tls::common_tls_context::CertificateProviderInstance {
+                                                instance_name: "roots".into(),
+                                                certificate_name: "ROOTCA".into(),
+                                            },
+                                        ),
+                                        default_validation_context: None,
+                                    },
+                                ),
+                            ),
+                        }),
+                    },
+                ))),
+            }),
             ..xds_cluster::Cluster::default()
         };
         let assignment = xds_endpoint::ClusterLoadAssignment {
@@ -826,6 +927,17 @@ mod tests {
             ["orders.example.com"]
         );
         assert_eq!(cfg.clusters[0].endpoints[0].address, "10.244.0.20");
+        assert_eq!(
+            cfg.clusters[0]
+                .tls
+                .as_ref()
+                .and_then(|tls| tls.sni.as_deref()),
+            Some("orders.app.svc.cluster.local")
+        );
+        let tls = cfg.clusters[0].tls.as_ref().unwrap();
+        assert_eq!(tls.certificate_provider.as_deref(), Some("workload"));
+        assert_eq!(tls.validation_provider.as_deref(), Some("roots"));
+        assert_eq!(tls.alpn_protocols, ["h2"]);
     }
 
     fn response(type_url: &str, resources: Vec<Any>) -> DiscoveryResponse {

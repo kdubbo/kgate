@@ -20,6 +20,9 @@ axum = "0.6"
 clap = { version = "4.5", features = ["derive", "env"] }
 http = "0.2"
 hyper = { version = "0.14", features = ["client", "http1", "http2", "server", "tcp"] }
+hyper-rustls = { version = "0.24", default-features = false, features = ["http1", "logging", "tls12", "tokio-runtime"] }
+rustls = { version = "0.21", features = ["dangerous_configuration"] }
+rustls-pemfile = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 serde_yaml = "0.9"
@@ -30,6 +33,5 @@ tokio = { version = "1", features = ["fs", "macros", "net", "rt-multi-thread", "
 tokio-stream = "0.1"
 tonic = { version = "0.11", features = ["transport"] }
 tonic-build = "0.11"
-tower = "0.4"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }

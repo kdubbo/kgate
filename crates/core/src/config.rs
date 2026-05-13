@@ -248,12 +248,26 @@ pub struct Cluster {
     pub name: String,
     #[serde(default)]
     pub endpoints: Vec<Endpoint>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tls: Option<UpstreamTls>,
 }
 
 impl Cluster {
     pub fn healthy_endpoints(&self) -> impl Iterator<Item = &Endpoint> {
         self.endpoints.iter().filter(|ep| ep.healthy)
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UpstreamTls {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sni: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub certificate_provider: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub validation_provider: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub alpn_protocols: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -387,10 +401,12 @@ mod tests {
                 Cluster {
                     name: "admin".into(),
                     endpoints: vec![],
+                    tls: None,
                 },
                 Cluster {
                     name: "default".into(),
                     endpoints: vec![],
+                    tls: None,
                 },
             ],
             secrets: vec![],

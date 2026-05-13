@@ -172,6 +172,7 @@ fn runtime_config(backend_addr: SocketAddr) -> RuntimeConfig {
                 healthy: true,
                 node_name: None,
             }],
+            tls: None,
         }],
         secrets: vec![],
     }

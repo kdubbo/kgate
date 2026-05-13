@@ -8,4 +8,6 @@ In Kubernetes, dubbod should provide a small bootstrap file and set `DXGATE_BOOT
 
 After bootstrap, dxgate opens an ADS stream to dubbod, subscribes the configured LDS listener names, follows discovered RDS/CDS/EDS resources, and applies the resulting runtime config without a static route file.
 
+If CDS returns an `UpstreamTlsContext`, dxgate opens upstream traffic with mTLS. Set `GRPC_XDS_BOOTSTRAP` to the gRPC xDS bootstrap that contains the `file_watcher` certificate provider for `cert-chain.pem`, `key.pem`, and `root-cert.pem`; otherwise the TLS-marked cluster returns `502`.
+
 `DXGATE_STATIC_CONFIG` remains available for local development and fallback only.

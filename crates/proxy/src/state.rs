@@ -136,6 +136,7 @@ mod tests {
                     healthy: true,
                     node_name: None,
                 }],
+                tls: None,
             }],
             secrets: vec![],
         }
